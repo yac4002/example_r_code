@@ -1,0 +1,802 @@
+---
+title: "project_final"
+author: "Yanyan Chen"
+date: "2022/5/12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+## load libraries
+library(grf)
+library(readxl)
+library(plyr)
+library(dplyr)
+library(gtsummary)
+library(stringr)
+library(Matrix)
+library(prettyR)
+library(Hmisc)
+library(ROCR)
+library(pROC)
+library(survival)
+library(survminer)
+library(flexsurv)
+library(mice)
+library(zoo)
+
+```
+
+```{r}
+## load data
+data <- read_xlsx('Codebook.xlsx', sheet = 'Sheet2', col_names = TRUE)
+```
+
+# Descriptive Statistics
+
+```{r}
+## check missingness
+#colSums(is.na(data))
+
+## Check data types
+#str(data)
+
+# tumor_size_path, regional_lymph_nodes_exami, clin_stage_group, t_class_clinical, lvi, er_tumor_registry, er_expression, pr_tumor_registry, pr_expression, clinical_t_stage, clinical_n_stage, primary_date_first_surgery, if_primary_surgery_date_of, primary_pt_stage, primary_pn_stage, postop_adjuvant_xrt, genetic_testing
+```
+
+```{r}
+## table shows how data should have been cleaned
+table1 <- tbl_summary(data,
+            statistic = all_continuous() ~ c("{mean} ({sd})"),
+            missing_text='missing') 
+#table1 %>%
+  as_flex_table() %>%
+  flextable::save_as_docx(path='table1.docx')
+```
+
+## data clean
+```{r}
+## survival time: surv_time, outcome: recurrence_or_death
+## remove obs 622, 479, 809
+data_clean <- data %>%
+  filter(!is.na(date_death_recurrence)) %>%
+  filter(!is.na(recurrence_or_death)) %>%
+  mutate(t_class_clinical = case_when(str_detect(t_class_clinical, '1') ~ '1',
+                                      str_detect(t_class_clinical, '2') ~ '2',
+                                      str_detect(t_class_clinical, '3') ~ '3',
+                                      str_detect(t_class_clinical, '4') ~ '4',
+                                      str_sub(t_class_clinical,1,1)=='0' ~ '0'),
+         dob = as.Date(dob),
+         date_diagnosis = as.Date(date_diagnosis),
+         race = ifelse(race %in% c('6.0', '7.0', '8.0', '9.0', '10.0', '11.0', '12.0'), '5', race),
+         race = ifelse(race %in% c('1,15','1,2', '13.0'), '15', race),
+         n_class_clinical = case_when(str_detect(n_class_clinical, '2') ~ '2',
+                                      str_sub(n_class_clinical,1,1)=='3' ~ '3',
+                                      str_detect(n_class_clinical, '0') ~ '0',
+                                      str_detect(n_class_clinical, '1') ~ '1'),
+         clin_stage_group = case_when(str_sub(clin_stage_group,1,1)=='1' ~ 1,
+                                      str_sub(clin_stage_group,1,1)=='2' ~ 2,
+                                      str_sub(clin_stage_group,1,1)=='3' ~ 3,
+                                      str_sub(clin_stage_group,1,1)=='4' ~ 4),
+         t_class_pathologic = case_when(t_class_pathologic=='0.0' ~ '0',
+                                        str_detect(t_class_pathologic, '1') ~ '1',
+                                        str_detect(t_class_pathologic, '2') ~ '2',
+                                        str_detect(t_class_pathologic, '3') ~ '3',
+                                        str_sub(t_class_pathologic,1,1)=='4' ~ '4'),
+         n_class_pathologic = case_when(n_class_pathologic=='0.0'|n_class_pathologic=='N0'|str_detect(n_class_pathologic, 'p0') ~ '0',
+                                        str_detect(n_class_pathologic, '1') ~ '1',
+                                        str_detect(n_class_pathologic, '2') ~ '2',
+                                        str_detect(n_class_pathologic, '3') ~ '3'),
+         path_stage_group = ifelse(str_sub(path_stage_group,1,1)=='2',
+                                   '2',
+                                   '3'),
+         hormone_therapy = case_when(hormone_therapy=='0' ~ 0,
+                                     hormone_therapy=='1' ~ 1),
+         reason_for_no_radiation = ifelse(reason_for_no_radiation=='7',
+                                          NA,
+                                          reason_for_no_radiation),
+         high_grade_disease = ifelse(high_grade_disease=='3',
+                                     NA,
+                                     high_grade_disease),
+         ki67 = case_when(ki67<=5 ~ 'G1',
+                          ki67>5&ki67<=20 ~ 'G2',
+                          ki67>20 ~ 'G3'),
+         er_expression = case_when(er_expression=='44849' ~ '>1%',
+                                   er_expression=='<1'|er_expression=='0' ~ '<1%'),
+         pr_expression = case_when(pr_expression=='<5' ~ '>1%',
+                                   pr_expression=='<1'|pr_expression=='0' ~ '<1%'),
+         her2_neu_p_n_uk = ifelse(her2_neu_p_n_uk=='4',
+                                  NA,
+                                  her2_neu_p_n_uk),
+         her2_neu_ihc = as.factor(her2_neu_ihc),
+         her2_neu_fish = as.factor(her2_neu_fish),
+         her2_status = as.factor(her2_status),
+         first_treatment_modality=as.factor(first_treatment_modality),
+         attempt_lumpectomy=as.factor(attempt_lumpectomy),
+         mastectomy_surgery=as.factor(mastectomy_surgery),
+         cpm=as.factor(cpm),
+         sln_biopsy=as.factor(sln_biopsy),
+         alnd=as.factor(alnd),
+         clinical_t_stage=case_when(clinical_t_stage%in%c('1','2','3')~'1',
+                                    clinical_t_stage=='4'~'2',
+                                    clinical_t_stage=='5'~'3',
+                                    clinical_t_stage=='6'~'4'),
+         clinical_n_stage=case_when(n_class_clinical%in%c('1','2','3')~'1',
+                                      n_class_clinical=='0'~'0'),
+         primary_pt_stage=as.factor(primary_pt_stage),
+         primary_pn_stage=as.factor(primary_pn_stage),
+         neoadjuvant_chemo=as.factor(neoadjuvant_chemo),
+         her2_neu_fish=as.factor(her2_neu_fish),
+         nact_complete_preop_ctx=as.factor(nact_complete_preop_ctx),
+         ctx_components=as.factor(ctx_components),
+         ctx_preop_herceptin=as.factor(ctx_preop_herceptin),
+         ctx_preop_perjeta= as.factor(ctx_preop_perjeta),
+         mact_ypt_stage=as.factor(mact_ypt_stage),
+         nact_ypn_stage=as.factor(nact_ypn_stage),
+         nact_pcr=as.factor(nact_pcr),
+         nact_postop_capecitabine=as.factor(nact_postop_capecitabine),
+         nact_postop_kadcyla = factor(nact_postop_kadcyla),
+         postop_adjuvant_ctx = factor(postop_adjuvant_ctx),
+         postop_adjuvant_ctx_comp = factor(postop_adjuvant_ctx_comp),
+         postop_adjuvant_ctx_init = as.Date(postop_adjuvant_ctx_init),
+         postop_adjuv_ctx_component = factor(postop_adjuv_ctx_component),
+         postop_adjuvant_xrt = factor(postop_adjuvant_xrt),
+         postop_xrt_initiated = as.Date(postop_xrt_initiated),
+         adju_endo_therapy = factor(adju_endo_therapy),
+         adjuv_endo_type = factor(adjuv_endo_type),
+         genetic_testing = factor(genetic_testing),
+         date_last_fu = as.Date(date_last_fu),
+         status_last_fu = factor(status_last_fu),
+         date_of_first_recurrence = as.Date(date_of_first_recurrence),
+         type_of_first_recurrence = factor(type_of_first_recurrence),
+         local_recurrence = factor(local_recurrence),
+         date_local_recurrence = as.Date(date_local_recurrence),
+         distant_recurrence = factor(distant_recurrence),
+         date_first_distant_recurr = as.Date(date_first_distant_recurr),
+         new_subsequent_br1 = factor(new_subsequent_br1),
+         date_new_breast_primary = as.Date(date_new_breast_primary),
+         date_death = as.Date(date_death),
+         recurrence_or_death = as.numeric(recurrence_or_death),
+         date_death_recurrence = as.Date(date_death_recurrence), 
+         surv_time = difftime(date_death_recurrence, date_diagnosis, units="days")) %>%
+  mutate(n_class_clinical = case_when(n_class_clinical%in%c('1','2','3')~'1',
+                                      n_class_clinical=='0'~'0'),
+         n_class_pathologic = case_when(n_class_pathologic%in%c('1','2','3')~'1',
+                                      n_class_pathologic=='0'~'0'),
+         clinical_t_stage = as.factor(clinical_t_stage),
+         clinical_n_stage = as.factor(clinical_n_stage)) %>%
+  mutate(patient_location = as.factor(patient_location),
+         spanish_origin = as.factor(spanish_origin),
+         sex = as.factor(sex),
+         mammo_screen = as.factor(mammo_screen),
+         mammo_occult = as.factor(mammo_occult),
+         mri_screen = as.factor(mri_screen),
+         surgical_procedure_of_prim = as.factor(surgical_procedure_of_prim),
+         tumor_size_path = as.numeric(tumor_size_path),
+         index_tumor_status = as.factor(index_tumor_status),
+         regional_ln_surgery = as.factor(regional_ln_surgery),
+         past_ipsilateral = as.factor(past_ipsilateral),
+         pat_contralateral = as.factor(pat_contralateral),
+         race = as.factor(race),
+         sentinel_lymph_nodes_exami = as.numeric(sentinel_lymph_nodes_exami),
+         t_class_clinical = as.factor(t_class_clinical),
+         n_class_clinical = as.factor(n_class_clinical),
+         clin_stage_group = as.factor(clin_stage_group),
+         t_class_pathologic = as.factor(t_class_pathologic),
+         n_class_pathologic = as.factor(n_class_pathologic),
+         path_stage_group = as.factor(path_stage_group),
+         hormone_therapy = as.factor(hormone_therapy),
+         reason_for_no_radiation = as.factor(reason_for_no_radiation),
+         radiation_surgery_sequence	 = as.factor(radiation_surgery_sequence),
+         matatases_dx = as.factor(matatases_dx),
+         histology = as.factor(histology),
+         grade_of_differentiation_p = as.factor(grade_of_differentiation_p),
+         high_grade_disease = as.factor(high_grade_disease),
+         lvi = as.factor(lvi),
+         ki67 = as.factor(ki67),
+         er_tumor_registry = as.factor(er_tumor_registry),
+         er = as.factor(er),
+         er_status = as.factor(er_status),
+         er_expression = as.factor(er_expression),
+         pr_tumor_registry = as.factor(pr_tumor_registry),
+         progesterone_receptor = as.factor(progesterone_receptor),
+         pr_status = as.factor(pr_status),
+         pr_expression = as.factor(pr_expression),
+         her2_neu_p_n_uk = as.factor(her2_neu_p_n_uk),
+         surv_time = as.numeric(surv_time))
+
+```
+
+```{r}
+## exclusion of variables into analysis 
+## variables with excessive missing values
+mis_var <- c('histology_other','comments_remarks', 'record_id', 'genetic_testing_result',
+'race_other', 'tumor_size_img', 'tumor_size_summary', 'nact_complete_preop_ctx', 'ctx_components', 'ctx_preop_herceptin', 'ctx_preop_perjeta', 'mact_ypt_stage', 'nact_ypn_stage', 'nact_pcr', 'nact_postop_capecitabine', 'nact_postop_kadcyla', 'adjuv_endo_type', 'regional_lymph_nodes_posit', 'sentinel_lymph_nodes_exami', 'sentinel_lymph_nodes_posit', 'n_class_clinical', 'n_class_pathologic', 'ki67',  'her2_neu_ihc',  'postop_adjuvant_ctx_comp', 'postop_adjuv_ctx_component')
+
+## variable are not useful
+var_useless <- c('dob', 'date_diagnosis', 'primary_date_first_surgery', 'if_primary_surgery_date_of', 'date_ctx', 'postop_adjuvant_ctx_init','postop_xrt_initiated', 'genetic_testing_result', 'date_last_fu', 'date_of_first_recurrence', 'date_local_recurrence', 'site_first_distant_recur', 'date_first_distant_recurr', 'date_death', 'date_death_recurrence', 'date_new_breast_primary', 'date_first_treatment', 'patient_location', 'sex', 'er', 'er_status', 'er_expression', 'progesterone_receptor', 'pr_status', 'pr_expression', 'status_last_fu', 'type_of_first_recurrence', 'local_recurrence', 'distant_recurrence', "new_subsequent_br1", 'er_tumor_registry', 'pr_tumor_registry')
+
+# tumor_size_path, regional_lymph_nodes_exami, clin_stage_group, t_class_clinical, lvi, er_tumor_registry, pr_tumor_registry, pr_expression, clinical_t_stage, clinical_n_stage,  primary_pt_stage, primary_pn_stage, postop_adjuvant_xrt, genetic_testing
+data_clean <- data_clean %>%
+   dplyr::select(-c(all_of(mis_var), all_of(var_useless)))
+
+```
+
+```{r}
+## variables need to classify again
+# race (WA1, AA2, UK14, Asian/Pacific5-12, Others13/15), spanish_origin (non-spanish10, Unknown2, spanish1/3-9), surgical_procedure_of_prim (22, total masterctomy40-49others), regional_ln_surgery(Other6/7/9/10, Regional LN Surgery1-4), histology (IDC/ILC1-3, Others),  primary_pt_stage (T1 1-4, T2 5, T3/T4), primary_pn_stage (N0 1, N1 2-3, N2/3), postop_adjuvant_xrt (Postop/Adjuvant XRT 2-4, none 1)
+data_clean <- data_clean %>%
+  mutate(race = case_when(race=='1' ~ 'WA',
+                          race=='2' ~ 'AA',
+                          race=='14' ~ 'UK',
+                          race%in%c('5','6','7','9','11','12') ~ 'Asian_Pacific',
+                          race%in%c('13','15','4') ~ 'Other'),
+         spanish_origin = case_when(spanish_origin=='10' ~ 'non_spanish',
+                                    spanish_origin=='2' ~ 'unknown',
+                                    spanish_origin%in%c('1','3','4','9') ~ 'spanish'),
+         surgical_procedure_of_prim = case_when(surgical_procedure_of_prim=='22' ~ 'Lum_ex_biopsy',
+                                                str_sub(surgical_procedure_of_prim,1,1)=='4' ~ 'total_masterctomy',
+                                                surgical_procedure_of_prim!='22'&str_sub(surgical_procedure_of_prim,1,1)!='4' ~ 'Others'),
+         regional_ln_surgery = case_when(regional_ln_surgery%in%c('6','7','9','10') ~ 'Others',
+                                         regional_ln_surgery%in%c('1','2','3','4') ~ 'regional_ln_surgery'),
+         histology = case_when(histology%in%c('1','2','3') ~ 'idc/ilc',
+                               histology%in%c('5','6') ~ 'others'),
+         primary_pt_stage = case_when(primary_pt_stage%in%c('1','2','3','4') ~ 'T1',
+                                      primary_pt_stage=='5' ~ 'T2',
+                                      primary_pt_stage%in%c('6','7') ~ 'T3/4'),
+         primary_pn_stage = case_when(primary_pn_stage=='1' ~ 'N0',
+                                      primary_pn_stage%in%c('2','3') ~ 'N1',
+                                      primary_pn_stage%in%c('4','5') ~ 'N2/3'),
+         postop_adjuvant_xrt = case_when(postop_adjuvant_xrt=='1' ~ 'none',
+                                         postop_adjuvant_xrt%in%c('2','3','4') ~ 'postop_adjuvant'),
+         t_class_clinical = case_when(t_class_clinical%in%c('0','1','2') ~ 'T1/T2',
+                                      t_class_clinical%in%c('3','4') ~ 'T3/T4'),
+         reason_for_no_radiation = case_when(reason_for_no_radiation%in%c('1','4','5') ~ 'recommanded',
+                                             reason_for_no_radiation%in%c('2','3') ~ 'notrecommanded')) %>%
+  mutate(race = as.factor(race),
+         spanish_origin = as.factor(spanish_origin),
+         surgical_procedure_of_prim = as.factor(surgical_procedure_of_prim),
+         regional_ln_surgery = as.factor(regional_ln_surgery),
+         histology = as.factor(histology),
+         primary_pt_stage = as.factor(primary_pt_stage),
+         primary_pn_stage = as.factor(primary_pn_stage),
+         postop_adjuvant_xrt = as.factor(postop_adjuvant_xrt),
+         t_class_clinical = as.factor(t_class_clinical),
+         reason_for_no_radiation = as.factor(reason_for_no_radiation))
+
+## check with table1 again
+table1_cleaned <- tbl_summary(data_clean,
+            statistic = all_continuous() ~ c("{mean} ({sd})"),
+            missing_text='missing',
+            by = recurrence_or_death)
+
+# table1_cleaned %>%
+#   as_flex_table() %>%
+#   flextable::save_as_docx(path='table1_cleaned.docx')
+```
+
+```{r}
+## multivariate imputation (5 different imputations)
+# x <- model.matrix(~., data_clean)
+# imp <- mice(x, method = 'rf', 3, seed = 25)
+#with(imp, )
+# summary(imp)
+# data_imputed <- complete(imp, action = 1)
+# 
+# imp0 <- mice(data_clean, 1, seed = 25)
+# summary(imp0)
+# data_imputed0 <- complete(imp0, action = 1)
+
+ 
+```
+
+```{r}
+## single imputation
+var_inpute <- names(data_clean[,1:43])
+data_impute <- data_clean
+single_imp <- function(var){
+  
+   for (i in 1:length(var)){
+     
+     data_impute <- data_impute %>%
+       dplyr::rename(var_name = all_of(var[i])) %>%
+       mutate(var_name = impute(all_of(var_name), mean)) 
+     
+     data_impute <- plyr::rename(data_impute, c(var_name = var[i])) 
+     
+   }
+   return(data_impute)
+  
+  
+}
+data_impute <- single_imp(var_inpute)
+
+## check with table1 again
+table1_inputed <- tbl_summary(data_impute,
+            statistic = all_continuous() ~ c("{mean} ({sd})"),
+            missing_text='missing',
+            by = recurrence_or_death,
+            type = list(c(tumor_size_path, regional_lymph_nodes_exami) ~ "continuous")) %>%
+  add_p()
+
+# table1_inputed %>%
+#   as_flex_table() %>%
+#   flextable::save_as_docx(path='table1_inputed.docx')
+table1_inputed
+```
+
+## assess collinearity
+```{r}
+cor(data_impute$age_diagnosis, data_impute$tumor_size_path)
+cor(data_impute$age_diagnosis, data_impute$regional_lymph_nodes_exami)
+cor(data_impute$regional_lymph_nodes_exami, data_impute$tumor_size_path)
+
+```
+
+# Data split 
+```{r}
+set.seed(25) # tried 35, 45 for sensitivity 
+
+## total 267 obs
+## 70% (190)
+index <- sample(1:nrow(data_impute), 190, replace = FALSE)
+
+train <- data_impute[index,]
+test <- data_impute[-index,] # 77 obs in test set
+```
+
+
+# Survival Analysis
+## K-M
+```{r}
+## Kaplan-Meier curve and calculate the median survival time for chemotherapy
+km <- survfit(Surv(surv_time, recurrence_or_death) ~ neoadjuvant_chemo, data = data_impute)
+ggsurvplot(km, 
+           data = data_impute, 
+           surv.median.line = "hv", 
+           conf.int = TRUE,
+           legend = "none", 
+           submain = "K-M estimates for chemotherapy", 
+           ggtheme = theme_bw(), 
+           pval = TRUE)
+
+## Median survival time
+surv_median(km)
+```
+
+## Cox proportional hazard
+```{r}
+## Fit univariable Cox PH model for every variable
+## for categorical variables
+cate_var <- colnames(data_impute)[colnames(data_impute)!='surv_time'&colnames(data_impute)!='recurrence_or_death'&colnames(data_impute)!='age_diagnosis'&colnames(data_impute)!='tumor_size_path'&colnames(data_impute)!='regional_lymph_nodes_exami']
+
+uni <- function(var){
+  
+  form <- as.formula(paste("Surv(surv_time, recurrence_or_death)", var, sep=" ~ "))
+  
+  ## km and cumulative hazard function
+  fit <- surv_fit(form, data = data_impute)
+ plot <- ggsurvplot(fit, 
+                          data = data_impute,
+                          submain = paste0(var," : K-M estimates"),
+                         legend = "none",
+                          ggtheme = theme_bw(),
+                          pval = FALSE)$plot
+  
+  ## cox ph model
+  cox <- coxph(form, data = data_impute)
+  ph <- cox.zph(cox)
+
+  ## log rank test
+  lr <- survdiff(form, data = data_impute)
+   
+  return(list(lr=lr, 
+              ph=ph))
+
+}
+
+lapply(cate_var, uni)
+## p-value<0.2
+```
+
+significant: mri_screen, index_tumor_status, pat_contralateral, t_class_clinical, clin_stage_group, t_class_pathologic, path_stage_group, reason_for_no_radiation, radiation_surgery_sequence, high_grade_disease, her2_neu_fish, her2_status, first_treatment_modality, sln_biopsy, alnd, clinical_t_stage, clinical_n_stage, primary_pt_stage, neoadjuvant_chemo, postop_adjuvant_ctx, postop_adjuvant_xrt
++
+numeric all included to selection method: age_diagnosis, tumor_size_path, regional_lymph_nodes_exami
+24 in total
+
+not met coxph: matatases_dx, alnd, postop_adjuvant_ctx
+
+```{r}
+## numeric: age_diagnosis, tumor_size_path, regional_lymph_nodes_exami
+age_fit <- coxph(Surv(surv_time, recurrence_or_death) ~ age_diagnosis, data = data_impute)
+summary(age_fit) 
+cox.zph(age_fit)
+age_fun <- coxph(Surv(surv_time, recurrence_or_death) ~ age_diagnosis + I(age_diagnosis^2) + I(sqrt(age_diagnosis)) + I(log(age_diagnosis)), data = data_impute)
+ggcoxfunctional(age_fun,
+                data = data_impute,
+                font.main = 9, 
+                font.x = 9, 
+                font.y = 9, 
+                font.tickslab = 8)
+
+
+tumor_size_path_fit <- coxph(Surv(surv_time, recurrence_or_death) ~ tumor_size_path, data = data_impute)
+summary(tumor_size_path_fit) 
+cox.zph(tumor_size_path_fit)
+tumor_size_path_fun <- coxph(Surv(surv_time, recurrence_or_death) ~ tumor_size_path + I(tumor_size_path^2) + I(sqrt(tumor_size_path)) + I(log(tumor_size_path)), data = data_impute)
+ggcoxfunctional(tumor_size_path_fun,
+                data = data_impute,
+                font.main = 9, 
+                font.x = 9, 
+                font.y = 9, 
+                font.tickslab = 8)
+
+regional_lymph_nodes_exami_fit <- coxph(Surv(surv_time, recurrence_or_death) ~ regional_lymph_nodes_exami, data = data_impute)
+summary(regional_lymph_nodes_exami_fit) 
+cox.zph(regional_lymph_nodes_exami_fit)
+regional_lymph_nodes_exami_fun <- coxph(Surv(surv_time, recurrence_or_death) ~ regional_lymph_nodes_exami + I(regional_lymph_nodes_exami^2) + I(sqrt(regional_lymph_nodes_exami)) + I(log(regional_lymph_nodes_exami+0.5)), data = data_impute)
+ggcoxfunctional(regional_lymph_nodes_exami_fun,
+                data = data_impute,
+                font.main = 9, 
+                font.x = 9, 
+                font.y = 9, 
+                font.tickslab = 8)
+```
+
+## variable selection method
+```{r}
+## backward selection
+
+## method 1
+library(MASS)
+
+# Fit the full model 
+full.model <- coxph(Surv(surv_time, recurrence_or_death) ~ mri_screen + index_tumor_status + pat_contralateral + t_class_clinical + clin_stage_group + t_class_pathologic + path_stage_group + reason_for_no_radiation + radiation_surgery_sequence + high_grade_disease + her2_neu_fish + her2_status + first_treatment_modality + sln_biopsy + alnd + clinical_t_stage + clinical_n_stage + primary_pt_stage + neoadjuvant_chemo + postop_adjuvant_ctx + postop_adjuvant_xrt + age_diagnosis + tumor_size_path + regional_lymph_nodes_exami, data = train)
+
+# Stepwise regression model
+backwards.model <- stepAIC(full.model, direction = "backward", 
+                      trace = FALSE)
+
+summary(backwards.model)
+
+# Fit on test
+c.index <- concordance(backwards.model, newdata=test)
+c.index
+```
+
+significant predictors: reason_for_no_radiation, high_grade_disease, her2_status, first_treatment_modality
+selected variables: mri_screen, index_tumor_status, pat_contralateral, t_class_clinical, clin_stage_group, t_class_pathologic, path_stage_group, reason_for_no_radiation, radiation_surgery_sequence, high_grade_disease, her2_neu_fish, her2_status, first_treatment_modality, sln_biopsy, alnd, clinical_n_stage, postop_adjuvant_ctx,postop_adjuvant_xrt,age_diagnosis, tumor_size_path
+Concordance = 25: 0.808 (on training set)/35: 0.748/45: 0.785
+Concordance = 25: 0.6401 (on test set)/ 35: 0.669/45: 0.437 
+
+
+```{r}
+## elastic net
+
+library(glmnet)
+library(foreach)
+# assign predictors to x and outcome to y
+x = model.matrix(Surv(surv_time, recurrence_or_death) ~ mri_screen + index_tumor_status + pat_contralateral + t_class_clinical + clin_stage_group + t_class_pathologic + path_stage_group + reason_for_no_radiation + radiation_surgery_sequence + high_grade_disease + her2_neu_fish + her2_status + first_treatment_modality + sln_biopsy + alnd + clinical_t_stage + clinical_n_stage + primary_pt_stage + neoadjuvant_chemo + postop_adjuvant_ctx + postop_adjuvant_xrt + age_diagnosis + tumor_size_path + regional_lymph_nodes_exami,train )[,-1] # First column corresponds to the intercept and is removed
+
+y = train[c('surv_time', 'recurrence_or_death')] %>% 
+  mutate(surv_time = ifelse(surv_time == 0, 1, surv_time)) %>% as.matrix ## change any survival times of 0 to 1 because it gives error in function, convert y to matrix
+colnames(y) <- c('time', 'status') ## change column names
+
+# combine x and y into a list
+Coxdata <- list(x = x, y = y)
+
+# select parameters: lamda selection with alpha = .5
+grid =10^seq(10,-2,length =100)
+enet.mod = glmnet(Coxdata$x,Coxdata$y,lambda = grid,alpha=0.5, family = "cox")
+dim(coef(enet.mod))
+plot(enet.mod,xvar="lambda")
+
+enet.cv = cv.glmnet(Coxdata$x,Coxdata$y,alpha=0.5,nfolds=10, family = "cox")
+plot(enet.cv)
+
+# selected amda values
+enet.cv$lambda.min
+
+enet.cv$lambda.1se
+
+# variable selection
+lambda.chosen = c(enet.cv$lambda.min,enet.cv$lambda.1se)
+enet.mod = glmnet(Coxdata$x,Coxdata$y, family = "cox", lambda = lambda.chosen,alpha=0.5)
+coef(enet.mod,s=lambda.chosen)
+## model 1 has selected variables, model 2 all variables reduce to zero (lamda is likely too high)
+
+# fit model 1 on test
+el.fit1 <- coxph(formula = Surv(surv_time, recurrence_or_death) ~ first_treatment_modality + clinical_n_stage + neoadjuvant_chemo + tumor_size_path , 
+    data = train)
+summary(el.fit1)
+
+## Concordance= 0.777
+
+# fit model 1 on test
+c.index <- concordance(el.fit1, newdata=test)
+c.index
+
+## Concordance= 0.858
+
+#-------------------------------------------------------------------------------------#
+# select parameters: alpha and lamda selection
+## https://www.r-bloggers.com/2017/09/variable-selection-with-elastic-net/
+## selected alpha value fluctuates a lot with nfold = 10, still fluctuates with nfold = 20 but a little less than nfold = 10
+set.seed(25)
+a <- seq(0.05, 0.95, 0.05)
+search <- foreach(i = a, .combine = rbind) %dopar% {
+  cv <- cv.glmnet(Coxdata$x,Coxdata$y, family = "cox", nfold = 20, type.measure = "deviance", paralle = TRUE, alpha = i)
+  data.frame(cvm.min = cv$cvm[cv$lambda == cv$lambda.min], lambda.min = cv$lambda.min, cvm.1se = cv$cvm[cv$lambda == cv$lambda.1se], lambda.1se = cv$lambda.1se, alpha = i)
+}
+
+a <- seq(0.05, 0.95, 0.05)
+search <- foreach(i = a, .combine = rbind) %dopar% {
+  set.seed(25)
+  cv <- cv.glmnet(Coxdata$x,Coxdata$y, family = "cox", nfold = 20, type.measure = "deviance", paralle = TRUE, alpha = i)
+  data.frame(cvm.min = cv$cvm[cv$lambda == cv$lambda.min], lambda.min = cv$lambda.min, cvm.1se = cv$cvm[cv$lambda == cv$lambda.1se], lambda.1se = cv$lambda.1se, alpha = i)
+}
+
+# selected alpha and lamda values
+cv3_min <- search[search$cvm.min == min(search$cvm.min), ]
+cv3_1se <- search[search$cvm.1se == min(search$cvm.1se), ]
+
+# variable selection
+model3_1se <- glmnet(Coxdata$x,Coxdata$y, family = "cox", lambda = cv3_1se$lambda.1se, alpha = cv3_1se$alpha)
+coef(model3_1se) ## no significant variables
+
+model3_min <- glmnet(Coxdata$x,Coxdata$y, family = "cox", lambda = cv3_min$lambda.min, alpha = cv3_min$alpha)
+coef(model3_min)
+
+# fit model 3 on test
+
+## alpha = .8, lamda = 0.1614012
+el.fit2 <- coxph(formula = Surv(surv_time, recurrence_or_death) ~ first_treatment_modality + clinical_n_stage + neoadjuvant_chemo, 
+    data = train)
+summary(el.fit2)
+
+c.index <- concordance(el.fit2, newdata=test)
+c.index
+
+
+## alpha = .95, lamda = 0.05883514
+el.fit3 <- coxph(formula = Surv(surv_time, recurrence_or_death) ~ clin_stage_group + t_class_pathologic + reason_for_no_radiation + high_grade_disease + first_treatment_modality + clinical_n_stage, 
+    data = train) 
+summary(el.fit3)
+
+c.index <- concordance(el.fit3, newdata=test)
+c.index
+
+```
+
+fixed alpha, select lamda:
+alpha = .5
+lamda = 0.09280734
+significant variables: first_treatment_modality, clinical_n_stage, neoadjuvant_chemo, tumor_size_path/ 35: clin_stage_group is added/ 45: the same as 25
+Concordance on training = 0.689/35: 0.731/ 45: 0.742
+Concordance on test = 0.6609/35: 0.554/ 45:0.5389
+
+alpha = .5
+lamda = 0.2582419
+significant variables: NONE/45: first_treatment_modality
+
+select alpha and lambda paramaters (changes a lot based on seed, meaning that alpha selection is highly dependent on the assignmennt of observations to folds):
+alpha = .8
+lamda = 0.1614012
+significant variables: first_treatment_modality, clinical_n_stage, neoadjuvant_chemo/35: clin_stage_group is added/45: first_treatment_modality, tumor_size_path
+Concordance on train = 0.668/35: 0.683/ 45: 0.724
+Concordance on test = 0.6439/35: 0.6134/ 45: 0.5126
+
+alpha = .95
+lamda = 0.05883514
+significant variables: clin_stage_group, t_class_pathologic, reason_for_no_radiation, high_grade_disease, first_treatment_modality, clinical_n_stage
+Concordance on train = 0.712/35: 0.715 / 45: 0.752
+Concordance on test = 0.6952/35: 0.682/ 45: 0.585
+
+So the third model is the best so far. alpha = .95, lamda = 0.05883514
+
+```{r}
+# model 1 - backward selection (futher removed clin_stage_group)
+sfit1 <- coxph(formula = Surv(surv_time, recurrence_or_death) ~ mri_screen + index_tumor_status + pat_contralateral + t_class_clinical + t_class_pathologic + path_stage_group +reason_for_no_radiation + radiation_surgery_sequence + high_grade_disease + her2_neu_fish + her2_status + first_treatment_modality +  sln_biopsy + alnd + clinical_n_stage + postop_adjuvant_ctx +  postop_adjuvant_xrt + age_diagnosis + tumor_size_path, data = test)
+summary(sfit1)
+cox.zph(sfit1)
+
+```
+Because the global p-value of PH assumption test is greater than 0.05, we do not reject Null, model 1 satisfies the PH assumption.
+
+```{r}
+# model 2 - elastic net
+sfit2 <- coxph(Surv(surv_time, recurrence_or_death) ~ clin_stage_group + t_class_pathologic + reason_for_no_radiation + high_grade_disease + first_treatment_modality + clinical_n_stage, data = test)
+summary(sfit2)
+cox.zph(sfit2)
+```
+Because the global p-value of PH assumption test is greater than 0.05, we do not reject Null, model 2 satisfies the PH assumption.
+
+```{r}
+## model 3
+sfit3 <- coxph(Surv(surv_time, recurrence_or_death) ~ t_class_pathologic + reason_for_no_radiation + high_grade_disease + first_treatment_modality + clinical_n_stage + strata(clin_stage_group), data = test)
+summary(sfit3)
+cox.zph(sfit3)
+
+```
+
+```{r}
+## prediction
+# model 1
+sfit1_new <- coxph(formula = Surv(surv_time, recurrence_or_death) ~ mri_screen + index_tumor_status + pat_contralateral + t_class_clinical + t_class_pathologic + path_stage_group +reason_for_no_radiation + radiation_surgery_sequence + high_grade_disease +  clin_stage_group + her2_neu_fish + her2_status + first_treatment_modality +  sln_biopsy + alnd + clinical_n_stage + postop_adjuvant_ctx +  postop_adjuvant_xrt + age_diagnosis + tumor_size_path, data = train)
+
+c.index <- concordance(sfit1_new, newdata = test)
+c.index
+
+surv_table1 <- sfit1_new %>%
+  tbl_regression(exponentiate = TRUE)
+# surv_table1 %>%
+#   as_flex_table() %>%
+#   flextable::save_as_docx(path='surv_table1.docx')
+
+# model 2
+sfit2_new <- coxph(Surv(surv_time, recurrence_or_death) ~ clin_stage_group + t_class_pathologic + reason_for_no_radiation + high_grade_disease + first_treatment_modality + clinical_n_stage, data = train)
+
+c.index <- concordance(sfit2_new, newdata=test)
+c.index
+
+surv_table2 <- sfit2_new %>%
+  tbl_regression(exponentiate = TRUE)
+# surv_table2 %>%
+#   as_flex_table() %>%
+#   flextable::save_as_docx(path='surv_table2.docx')
+
+
+## ROC curve / AUC
+# model 1
+test_pred_1 <- predict(sfit1_new, test, type = "survival")
+roc(test$recurrence_or_death, test_pred_1)
+pred <- prediction(test_pred_1, test$recurrence_or_death)
+pred
+perf <- performance(pred, "tpr", "fpr")
+perf
+plot(perf)
+
+# model 2
+test_pred_2 <- predict(sfit2_new, test, type = "survival")
+roc(test$recurrence_or_death, test_pred_2)
+pred <- prediction(test_pred_2, test$recurrence_or_death)
+pred
+perf <- performance(pred, "tpr", "fpr")
+perf
+plot(perf)
+```
+model 1 AUC: 0.6207, concordance: 0.6401
+
+model 2 AUC: 0.6042, concordance: 0.6952
+
+```{r}
+## univariate models
+selected_var <- c('reason_for_no_radiation', 'high_grade_disease', 'first_treatment_modality', 'clin_stage_group', 't_class_pathologic', 'clinical_n_stage')
+
+uni <- function(var){
+  
+  form <- as.formula(paste("Surv(surv_time, recurrence_or_death)", var, sep = " ~ "))
+  km <- surv_fit(form, data = data_impute)
+  plot <- ggsurvplot(km, data = data_impute, legend = "bottom", pval = TRUE, pval.method = TRUE, log.rank.weights = "1")$plot
+  return(plot)
+
+}
+
+lapply(selected_var, uni)
+```
+
+# Random Forest
+```{r}
+## importance selection
+rf_x <- model.matrix(~., data_impute[,1:43])
+rf_y <- as.vector(data_impute$surv_time)
+rf_d <- as.vector(data_impute$recurrence_or_death)
+
+rf.fit <- survival_forest(X=rf_x,
+                          Y=rf_y,
+                          D=rf_d)
+
+importance_selc <- data.frame(var_name = colnames(rf_x),
+                         importance = variable_importance(rf.fit))
+importance_selc <- importance_selc %>%
+  filter(importance!=0)
+importance_selc$var_name
+
+##  "mri_screen" removed
+rf_x <- rf_x[,-11]
+
+```
+
+
+```{r}
+## tune parameters (number of variables to be sampled at each split and minimum number of data points in a terminal node)
+## Compute OOB concordance based on the mortality score in Ishwaran et al. (2008).
+## maximize the concordance index calculated on the out-of-bag data
+# rf_pred_nelson <- predict(rf.fit, prediction.type = "Nelson-Aalen")
+# chf.score <- rowSums(-log(rf_pred_nelson$predictions))
+# concordance(Surv(rf_y, rf_d) ~ chf.score, reverse = TRUE)
+train <- train[,-6]
+test <- test[,-6]
+
+mtry <- seq(1:(ncol(rf_x)))
+min.node.size <- seq(1:50)
+rf_x.train <- model.matrix(~., train[,1:42])
+rf_y.train <- as.vector(train$surv_time)
+rf_d.train <- as.vector(train$recurrence_or_death)
+concordance_set <- vector()
+
+## optimal mtry
+for (i in mtry){
+  
+  rf.fit <- survival_forest(X=rf_x.train,
+                            Y=rf_y.train,
+                            D=rf_d.train,
+                            mtry = i)
+  rf_pred_nelson <- predict(rf.fit, prediction.type = "Nelson-Aalen")
+  chf.score <- rowSums(-log(rf_pred_nelson$predictions))
+  concordance <- concordance(Surv(rf_y.train, rf_d.train) ~ chf.score, reverse = TRUE)
+  concordance_set <- append(concordance_set, concordance$concordance)
+  
+}
+mtry_max <- which.max(concordance_set)
+
+plot(mtry, concordance_set, type = 'b')
+
+## optimal min.node.size
+concordance_set <- vector()
+for (i in min.node.size){
+  
+  rf.fit <- survival_forest(X=rf_x.train,
+                            Y=rf_y.train,
+                            D=rf_d.train,
+                            mtry = mtry_max,
+                            min.node.size = i)
+  rf_pred_nelson <- predict(rf.fit, prediction.type = "Nelson-Aalen")
+  chf.score <- rowSums(-log(rf_pred_nelson$predictions))
+  concordance <- concordance(Surv(rf_y.train, rf_d.train) ~ chf.score, reverse = TRUE)
+  concordance_set <- append(concordance_set, concordance$concordance)
+  
+}
+min.node.size_max <- which.max(concordance_set)
+
+plot(min.node.size, concordance_set, type = 'b')
+
+## predict
+rf.test <- model.matrix(~., test[,1:42])
+rf.fit.optimal <- survival_forest(X=rf_x.train,
+                          Y=rf_y.train,
+                          D=rf_d.train,
+                          mtry = mtry_max,
+                          min.node.size = min.node.size_max)
+#rf.fit.optimal
+
+## importance
+importance <- data.frame(var_name = colnames(rf_x.train),
+                         importance = variable_importance(rf.fit.optimal)) %>%
+  arrange(desc(importance))
+
+# importance %>%
+#   rrtable::df2flextable() %>%
+#   flextable::save_as_docx(path='importtance table.docx')
+
+## c-index
+rf_pred.test <- predict(rf.fit.optimal, rf.test)
+c.index <- round(rcorr.cens(rowMeans(rf_pred.test$predictions), Surv(test$surv_time, test$recurrence_or_death))[[1]], 3)
+c.index
+
+## survival curves
+matplot(rf_pred.test$failure.times, 
+        t(rf_pred.test$predictions),
+        xlab = "failure time", 
+        ylab = "survival function",
+        type = "l", 
+        lty = 1)
+
+```
+
+
+
+
